@@ -16,24 +16,36 @@
  */
 package org.jkiss.dbeaver.ext.clickhouse.model;
 
+import java.sql.SQLException;
+import java.util.Date;
+import java.util.Map;
+
+import org.jkiss.code.NotNull;
 import org.jkiss.code.Nullable;
 import org.jkiss.dbeaver.Log;
 import org.jkiss.dbeaver.ext.generic.model.GenericStructContainer;
 import org.jkiss.dbeaver.ext.generic.model.GenericTable;
+import org.jkiss.dbeaver.model.DBPEvaluationContext;
 import org.jkiss.dbeaver.model.DBPObjectStatistics;
 import org.jkiss.dbeaver.model.DBUtils;
+import org.jkiss.dbeaver.model.data.DBDDataReceiver;
+import org.jkiss.dbeaver.model.data.DBDValueHandler;
+import org.jkiss.dbeaver.model.exec.DBCException;
+import org.jkiss.dbeaver.model.exec.DBCExecutionSource;
 import org.jkiss.dbeaver.model.exec.DBCSession;
+import org.jkiss.dbeaver.model.exec.DBCStatement;
+import org.jkiss.dbeaver.model.exec.DBCStatementType;
 import org.jkiss.dbeaver.model.exec.jdbc.JDBCPreparedStatement;
 import org.jkiss.dbeaver.model.exec.jdbc.JDBCResultSet;
 import org.jkiss.dbeaver.model.exec.jdbc.JDBCSession;
+import org.jkiss.dbeaver.model.impl.data.ExecuteBatchImpl;
 import org.jkiss.dbeaver.model.impl.jdbc.JDBCUtils;
 import org.jkiss.dbeaver.model.meta.Property;
 import org.jkiss.dbeaver.model.preferences.DBPPropertySource;
 import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
+import org.jkiss.dbeaver.model.struct.DBSAttributeBase;
+import org.jkiss.utils.ArrayUtils;
 import org.jkiss.utils.ByteNumberFormat;
-
-import java.sql.SQLException;
-import java.util.Date;
 
 /**
  * ClickhouseTable
@@ -141,5 +153,141 @@ public class ClickhouseTable extends GenericTable implements DBPObjectStatistics
         engine = JDBCUtils.safeGetString(dbResult, "engine");
     }
 
+    @Override
+    public ExecuteBatch updateData(@NotNull DBCSession session, @NotNull DBSAttributeBase[] updateAttributes,
+            @NotNull DBSAttributeBase[] keyAttributes, @Nullable DBDDataReceiver keysReceiver,
+            @NotNull DBCExecutionSource source) throws DBCException {
+        final DBSAttributeBase[] attributes = ArrayUtils.concatArrays(updateAttributes, keyAttributes);
+        return new ExecuteBatchImpl(attributes, keysReceiver, false) {
+
+            @NotNull
+            @Override
+            protected DBCStatement prepareStatement(@NotNull DBCSession session, DBDValueHandler[] handlers,
+                    Object[] attributeValues, Map<String, Object> options) throws DBCException {
+
+                final StringBuilder sql = new StringBuilder();
+
+                // ALTER
+                sql.append("ALTER TABLE").append(" ");
+                sql.append(DBUtils.getEntityScriptName(ClickhouseTable.this, options)).append(" ");
+
+                // UPDATE
+                sql.append("UPDATE").append(" ");
+                boolean hasAttribute = false;
+                for (DBSAttributeBase updateAttribute : updateAttributes) {
+                    if (!DBUtils.isPseudoAttribute(updateAttribute) && !DBUtils.isHiddenObject(updateAttribute)) {
+                        final String typeName = DBUtils.getFullTypeName(updateAttribute);
+                        final String key = DBUtils.getObjectFullName(updateAttribute, DBPEvaluationContext.DML);
+                        final String value = valuePlaceholder(typeName);
+                        if (hasAttribute) {
+                            sql.append(", ");
+                        }
+                        sql.append(key).append("=").append(value).append(" ");
+                        hasAttribute = true;
+                    }
+                }
+
+                // WHERE
+                sql.append("WHERE").append(" ");
+                boolean hasKeyAttribute = false;
+                for (DBSAttributeBase keyAttribute : keyAttributes) {
+                    final String typeName = DBUtils.getFullTypeName(keyAttribute);
+                    final String key = DBUtils.getObjectFullName(keyAttribute, DBPEvaluationContext.DML);
+                    final String operator = DBUtils.isNullValue(keyAttribute) ? " IS NULL " : " = ";
+                    final String value = valuePlaceholder(typeName);
+                    if (hasKeyAttribute) {
+                        sql.append(" AND ");
+                    }
+                    sql.append(key).append(operator).append(value);
+                    hasKeyAttribute = true;
+                }
+
+                sql.append(";\n");
+
+                // Execute
+                final DBCStatement statement = session.prepareStatement(DBCStatementType.QUERY, sql.toString(), false,
+                        false, keysReceiver != null);
+                statement.setStatementSource(source);
+                return statement;
+            }
+
+            @Override
+            protected void bindStatement(@NotNull DBDValueHandler[] handlers, @NotNull DBCStatement statement,
+                    Object[] attributeValues) throws DBCException {
+                for (int i = 0; i < handlers.length; i++) {
+                    handlers[i].bindValueObject(statement.getSession(), statement, attributes[i], i,
+                            attributeValues[i]);
+                }
+            }
+        };
+    }
+
+    @Override
+    public ExecuteBatch deleteData(DBCSession session, DBSAttributeBase[] keyAttributes, DBCExecutionSource source)
+            throws DBCException {
+        return new ExecuteBatchImpl(keyAttributes, null, false) {
+
+            @NotNull
+            @Override
+            protected DBCStatement prepareStatement(@NotNull DBCSession session, DBDValueHandler[] handlers,
+                    Object[] attributeValues, Map<String, Object> options) throws DBCException {
+
+                final StringBuilder sql = new StringBuilder();
+
+                // ALTER
+                sql.append("ALTER TABLE").append(" ");
+                sql.append(DBUtils.getEntityScriptName(ClickhouseTable.this, options)).append(" ");
+
+                // DELETE
+                sql.append("DELETE").append(" ");
+
+                // WHERE
+                sql.append("WHERE").append(" ");
+                boolean hasKeyAttribute = false;
+                for (DBSAttributeBase keyAttribute : keyAttributes) {
+                    final String typeName = DBUtils.getFullTypeName(keyAttribute);
+                    final String key = DBUtils.getObjectFullName(keyAttribute, DBPEvaluationContext.DML);
+                    final String operator = DBUtils.isNullValue(keyAttribute) ? " IS NULL " : " = ";
+                    final String value = valuePlaceholder(typeName);
+                    if (hasKeyAttribute) {
+                        sql.append(" AND ");
+                    }
+                    sql.append(key).append(operator).append(value);
+                    hasKeyAttribute = true;
+                }
+
+                sql.append(";\n");
+
+                // Execute
+                final DBCStatement statement = session.prepareStatement(DBCStatementType.QUERY, sql.toString(), false,
+                        false, keysReceiver != null);
+                statement.setStatementSource(source);
+                return statement;
+            }
+
+            @Override
+            protected void bindStatement(@NotNull DBDValueHandler[] handlers, @NotNull DBCStatement statement,
+                    Object[] attributeValues) throws DBCException {
+                for (int i = 0; i < handlers.length; i++) {
+                    handlers[i].bindValueObject(statement.getSession(), statement, attributes[i], i,
+                            attributeValues[i]);
+                }
+            }
+        };
+    }
+
+    private String valuePlaceholder(String typeName) {
+        if (typeName != null && typeName.toUpperCase().startsWith("ENUM")) {
+            return "CAST(?, '" + typeName.replace("'", "\\'") + "')";
+        } else if (typeName != null && typeName.equalsIgnoreCase("UUID")) {
+            return "toUUID(?)";
+        } else if (typeName != null && typeName.equalsIgnoreCase("Date")) {
+            return "toDate(?)";
+        } else if (typeName != null && typeName.equalsIgnoreCase("DateTime")) {
+            return "toDateTime(?)";
+        } else {
+            return "?";
+        }
+    }
 
 }
